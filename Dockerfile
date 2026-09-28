@@ -21,14 +21,38 @@
 #            docker images day12-agent:prod     # xem dung lượng
 # ═══════════════════════════════════════════════════════════════════
 
-FROM python:3.11
+# ---- Stage 1: builder — cài dependency vào /install, stage này bị bỏ đi sau khi build
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# Chỉ copy requirements trước: code đổi thì layer pip install vẫn dùng cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ---- Stage 2: runtime — chỉ mang theo thư viện đã cài + source code
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY . .
+COPY --from=builder /install /usr/local
 
-RUN pip install -r requirements.txt
+# User thường (không phải root) để chạy app
+RUN useradd --create-home --uid 10001 appuser
+
+COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser utils ./utils
+
+USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Gọi /health trên đúng cổng app đang nghe (PORT do platform gán, mặc định 8000)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT', '8000'), timeout=3)" || exit 1
+
+# Shell form để ${PORT:-8000} được nội suy lúc container chạy; bind 0.0.0.0 để gọi được từ ngoài container
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
